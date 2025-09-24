@@ -1,5 +1,3 @@
-// index.js (ESM)
-import axios from "axios";
 import * as TI from "technicalindicators";
 import { writeFileSync } from "node:fs";
 import { getKlines as getKlinesBinance } from "./binance.js";
@@ -11,19 +9,52 @@ const getKlines = {
 }
 const { EMA, RSI, MACD, BollingerBands, ADX, ATR } = TI;
 
-const STRATEGY_KLINE = process.env.INTERVAL || process.argv[2]; // 1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 8h, 12h, 1d, 3d, 1w, 1M
+/**
+ * STRATEGY_KLINE
+ * De onde buscar os candles.
+ * Exemplos: "binance" (cripto) ou "b3" (ações brasileiras via brapi).
+ * Uso: 
+ * node index.js binance BNBUSDT 15m spot
+ * node index.js b3 VALE3 1d spot
+ * node index.js b3 PETR4 15m spot
+ * node index.js binance BOB 15m futures
+ */
+const STRATEGY_KLINE = process.env.INTERVAL || process.argv[2];
+
+/**
+ * SYMBOL
+ * Ativo a ser analisado.
+ * Exemplos: "BNBUSDT" (Binance), "VALE3" (B3 via brapi).
+ */
 const SYMBOL = process.env.SYMBOL || process.argv[3];
-const INTERVAL = process.env.INTERVAL || process.argv[4]; // 1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 8h, 12h, 1d, 3d, 1w, 1M
-const MARKET = process.env.MARKET || process.argv[5]; // spot or futures
+
+/**
+ * INTERVAL
+ * Tempo de cada candle.
+ * Exemplos: 1m, 5m, 15m, 1h, 4h, 1d, 1w, 1M.
+ */
+const INTERVAL = process.env.INTERVAL || process.argv[4];
+
+/**
+ * MARKET
+ * Mercado/segmento. Na Binance: "spot" ou "futures".
+ * Na B3, manter "spot".
+ */
+const MARKET = process.env.MARKET || process.argv[5];
+
+/**
+ * LIMIT
+ * Quantidade de candles a carregar (quanto maior, mais histórico e mais lento).
+ * Exemplo: 1000.
+ */
 const LIMIT = Number(process.argv[6] || 1000);
 
-const VWAP_THRESHOLD = Number(process.env.VWAP_THRESHOLD || 1); // em %
-
-// node index.js b3 VALE3 1d spot
-// node index.js b3 PETR4 15m spot
-// node index.js binance BNBUSDT 15m spot
-// node index.js binance BOB 15m futures
-
+/**
+ * VWAP_THRESHOLD
+ * Percentual de tolerância em relação ao VWAP para emitir sinal (compra/venda).
+ * Exemplo prático: threshold=1 significa comprar se preço ≥ VWAP + 1%.
+ */
+const VWAP_THRESHOLD = Number(process.env.VWAP_THRESHOLD || 1);
 
 // VWAP acumulado: ∑(TP*Vol)/∑Vol
 function computeVWAP(candles) {
@@ -241,7 +272,17 @@ function intervalToTimeframe(interval) {
 
     // === Objeto detalhado ===
     const detailed = {
+      /**
+       * price
+       * Preço de fechamento do último candle analisado.
+       * Caso de uso: referência rápida do preço atual para comparação com indicadores.
+       */
       price,
+      /**
+       * ema
+       * Conjunto de EMAs (9/21/99/200) com valores, diferenças (%) e operador.
+       * Caso de uso: leitura de tendência em múltiplos horizontes (curto → longo).
+       */
       ema: {
         ema9: {
           value: lastEMA9,
@@ -266,18 +307,33 @@ function intervalToTimeframe(interval) {
         conclusion: emaConclusion,
         operator: emaOperator,
       },
+      /**
+       * rsi
+       * Índice de Força Relativa (9 períodos). Indica sobrecompra/sobrevenda.
+       * Caso de uso: gatilhos de reversão quando fora da zona 30–70.
+       */
       rsi: {
         value: lastRSI9,
         zone: lastRSI9 > 70 ? ">70" : lastRSI9 < 30 ? "<30" : "30-70",
         operator: rsiOperator,
         note: rsiNote,
       },
+      /**
+       * volume
+       * Volume do último candle; operador pela cor do candle (close vs open).
+       * Caso de uso: confirmar força imediata do movimento mais recente.
+       */
       volume: {
         value: lastVol,
         operator: volumeOperator,
         note:
           "Sem média comparativa para classificar 0–50%, 80–120%, etc.; operador pela cor do candle (close vs open).",
       },
+      /**
+       * vwap
+       * Preço médio ponderado por volume e sua diferença (%) para o preço atual.
+       * Caso de uso: detectar ‘caro/barato’ intraday com threshold configurável.
+       */
       vwap: {
         value: lastVWAP,
         diffPct: Number(vwapDiffPct.toFixed(2)),
@@ -285,6 +341,11 @@ function intervalToTimeframe(interval) {
         operator: vwapOperator,
         note: vwapNote,
       },
+      /**
+       * adx
+       * Força de tendência (ADX) e direcionais (+DI/-DI) do último ponto.
+       * Caso de uso: validar se há tendência ativa e seu lado predominante.
+       */
       adx: {
         adx: lastADX,
         plusDI: lastPlusDI,
@@ -292,6 +353,11 @@ function intervalToTimeframe(interval) {
         operator: adxOperator,
         note: "ADX > 25 sugere tendência ativa; +DI > -DI → compra, -DI > +DI → venda.",
       },
+      /**
+       * bollinger
+       * Bandas de Bollinger (limites inferior/superior, média) e posição do preço.
+       * Caso de uso: toques/rompimentos para potenciais reversões/continuações.
+       */
       bollinger: {
         lower: lastBBLower,
         middle: lastBBMiddle,
@@ -300,6 +366,11 @@ function intervalToTimeframe(interval) {
         operator: bollingerOperator,
         note: bollingerNote,
       },
+      /**
+       * macd
+       * MACD (12,26,9), sinal e histograma do último ponto.
+       * Caso de uso: cruzamentos e histograma > 0 (viés compra) ou < 0 (viés venda).
+       */
       macd: {
         macd: lastMACD,
         signal: lastMACDSignal,
@@ -307,6 +378,11 @@ function intervalToTimeframe(interval) {
         operator: macdOperator,
         note: macdNote,
       },
+      /**
+       * atr
+       * Average True Range (14) e sua porcentagem do preço.
+       * Caso de uso: medir volatilidade e calibrar stop/sizing de posição.
+       */
       atr: {
         value: lastATR,
         pctOfPrice: Number(atrPctOfPrice.toFixed(2)),
@@ -326,6 +402,11 @@ function intervalToTimeframe(interval) {
       detailed.macd.operator,
       detailed.atr.operator,
     ];
+    /**
+     * votes
+     * Contagem de votos entre indicadores (buy/sell/neutral) no último ponto.
+     * Caso de uso: enxergar consenso/empate entre sinais antes da decisão.
+     */
     const votes = {
       buy: indicatorOps.filter((v) => v === "buy").length,
       sell: indicatorOps.filter((v) => v === "sell").length,
@@ -350,6 +431,11 @@ function intervalToTimeframe(interval) {
     }
 
     // === Sinal agregado por indicador (com EMAs granulares)
+    /**
+     * signal
+     * Sinal individual por indicador e EMAs granulares (9/21/99/200).
+     * Caso de uso: depurar o que puxa a decisão agregada para buy/sell.
+     */
     const signal = {
       ema: detailed.ema.operator,
       rsi: detailed.rsi.operator,
@@ -413,6 +499,11 @@ function intervalToTimeframe(interval) {
     if (score > maxScore * deadZone) stance = "buy";
     else if (score < -maxScore * deadZone) stance = "sell";
 
+    /**
+     * nodes
+     * Nós explicativos (curto prazo, fluxo, estrutura) com peso e drivers.
+     * Caso de uso: narrativa do porquê do stance final.
+     */
     const nodes = [
       {
         id: "short-term",
@@ -451,6 +542,11 @@ function intervalToTimeframe(interval) {
 
     const timeframeStr = intervalToTimeframe(INTERVAL);
 
+    /**
+     * decision
+     * Decisão final agregada (stance, confiança, timeframe, gatilhos, risco).
+     * Caso de uso: orientar execução (comprar, vender, aguardar) e gestão de risco.
+     */
     const decision = {
       stance,
       confidence: Number(confidence.toFixed(2)),
