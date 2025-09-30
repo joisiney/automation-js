@@ -110,7 +110,9 @@ export class VolumeIndicator {
     };
   }
 
-  static decision(params: VolumeParams): IIndicatorDecisionMin<ReturnType<typeof VolumeIndicator.calculate>> {
+  static decision(
+    params: VolumeParams,
+  ): IIndicatorDecisionMin<ReturnType<typeof VolumeIndicator.calculate>> {
     const r = VolumeIndicator.calculate(params);
     if (!r.ok) {
       return {
