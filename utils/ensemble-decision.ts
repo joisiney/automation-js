@@ -26,5 +26,34 @@ export function ensembleDecision(
   const direction: TDirection =
     finalScore > buyThreshold ? "buy" : finalScore < sellThreshold ? "sell" : "none";
 
-  return { finalScore, direction };
+  // Classificação mais clara (faixas sugeridas)
+  // strong buy:  >= 0.30
+  // buy:         [0.15, 0.30)
+  // neutral:     (-0.15, 0.15)
+  // sell:        (-0.30, -0.15]
+  // strong sell: <= -0.30
+  let band: "strong_buy" | "buy" | "neutral" | "sell" | "strong_sell" = "neutral";
+  if (finalScore >= 0.3) band = "strong_buy";
+  else if (finalScore >= 0.15) band = "buy";
+  else if (finalScore <= -0.3) band = "strong_sell";
+  else if (finalScore <= -0.15) band = "sell";
+
+  const explanation =
+    band === "strong_buy"
+      ? "Consenso forte de compra entre os indicadores."
+      : band === "buy"
+        ? "Viés comprador; sinais majoritariamente positivos."
+        : band === "sell"
+          ? "Viés vendedor; sinais majoritariamente negativos."
+          : band === "strong_sell"
+            ? "Consenso forte de venda entre os indicadores."
+            : "Sinais mistos/insuficientes; evitar gatilho.";
+
+  return {
+    finalScore,
+    direction,
+    band,
+    thresholds: { buyThreshold, sellThreshold, strongBuy: 0.3, strongSell: -0.3 },
+    explanation,
+  };
 }

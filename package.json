@@ -6,7 +6,7 @@
   "type": "module",
   "scripts": {
     "start": "STRATEGY_KLINE=binance SYMBOL=BNBUSDT INTERVAL=15m MARKET=spot LIMIT=500 node --loader ts-node/esm boot.ts",
-    "dev": "STRATEGY_KLINE=binance SYMBOL=LIGHT INTERVAL=1m MARKET=futures LIMIT=500 node --watch --loader ts-node/esm boot.ts",
+    "dev": "STRATEGY_KLINE=binance SYMBOL=COAI INTERVAL=1m MARKET=futures LIMIT=500 node --watch --loader ts-node/esm boot.ts",
     "lint": "eslint .",
     "format": "prettier --write .",
     "typecheck": "tsc -p tsconfig.json --noEmit",
