@@ -73,11 +73,12 @@ export async function getKlines(
   interval: string,
   limit = 500,
   { market = "spot" }: { market?: Market } = {},
+  { startTime, endTime }: { startTime?: number; endTime?: number } = {},
 ) {
   const symbol = await resolveSymbol(inputSymbol, { market });
 
   if (market === "spot") {
-    const url = `${BINANCE_SPOT}/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`;
+    const url = `${BINANCE_SPOT}/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}&startTime=${startTime}&endTime=${endTime}`;
     const { data } = await axios.get<any[]>(url);
     return data.map((k) => ({
       openTime: k[0],
@@ -90,7 +91,7 @@ export async function getKlines(
     }));
   }
 
-  const url = `${BINANCE_FUT}/fapi/v1/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`;
+  const url = `${BINANCE_FUT}/fapi/v1/klines?symbol=${symbol}&interval=${interval}&limit=${limit}&startTime=${startTime}&endTime=${endTime}`;
   const { data } = await axios.get<any[]>(url);
   return data.map((k) => ({
     openTime: k[0],

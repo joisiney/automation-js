@@ -24,10 +24,17 @@ export async function getCandles(
   limit = 500,
   klinesType: keyof typeof strategiesKlines = "binance",
   market: Market = "spot",
+  t: { startTime?: number; endTime?: number } = {},
 ): Promise<CandlesOut> {
-  const candles = await strategiesKlines[klinesType](symbol, interval, limit, {
-    market,
-  } as any);
+  const candles = await strategiesKlines[klinesType](
+    symbol,
+    interval,
+    limit,
+    {
+      market,
+    } as any,
+    t,
+  );
   const opens = candles.map((c: any) => c.open);
   const closes = candles.map((c: any) => c.close);
   const highs = candles.map((c: any) => c.high);
