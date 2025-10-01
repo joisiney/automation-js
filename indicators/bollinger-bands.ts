@@ -19,6 +19,13 @@ export type BollingerParams = {
 
 type BBPoint = { lower: number; middle: number; upper: number };
 
+function slopeAt(arr: Array<number | null>, idx: number, k: number): number {
+  const a = arr[idx] as number | null;
+  const b = idx - k >= 0 ? (arr[idx - k] as number | null) : null;
+  if (a == null || b == null) return 0;
+  return (a - b) / k;
+}
+
 export class BollingerBandsIndicator {
   static calculate({
     candles,
@@ -39,6 +46,7 @@ export class BollingerBandsIndicator {
       return { ok: false as const, reason: "Dados insuficientes para confirmar no fechamento." };
     }
 
+    // --- Bandas
     const raw: BBPoint[] = TI.BollingerBands.calculate({
       period,
       values: closes as number[],
@@ -65,24 +73,50 @@ export class BollingerBandsIndicator {
     const pLower = lower[prevIndex] as number | null;
     const pUpper = upper[prevIndex] as number | null;
 
-    const widthPct = lMiddle ? (((lUpper ?? lMiddle) - (lLower ?? lMiddle)) / lMiddle) * 100 : 0;
+    // Largura e %B (métricas “pro”)
+    const bandWidth = lUpper != null && lLower != null ? lUpper - lLower : 0;
+    const widthPct = lMiddle ? (bandWidth / lMiddle) * 100 : 0; // largura relativa (%)
+    const percentB =
+      lUpper != null && lLower != null && bandWidth !== 0 ? (lc - lLower) / bandWidth : 0; // 0..1 dentro das bandas; <0 abaixo; >1 acima
 
-    // Posições e eventos
+    // Slope da média (tendência ajuda a decidir se é continuação ou MR)
+    const SLOPE_K = Math.min(3, lastIndex);
+    const middleSlope = slopeAt(middle, lastIndex, SLOPE_K); // valor absoluto por barra
+    const middleSlopePct = lMiddle ? (middleSlope / lMiddle) * 100 : 0; // % por barra
+
+    // Posições/eventos
     const touchUpper = lUpper != null ? lc >= lUpper : false;
     const touchLower = lLower != null ? lc <= lLower : false;
-    const position: "inside" | "touch_upper" | "touch_lower" | "outside" = touchUpper
-      ? "touch_upper"
-      : touchLower
-        ? "touch_lower"
-        : lUpper != null && lLower != null && (lc > lUpper || lc < lLower)
-          ? "outside"
-          : "inside";
 
+    // Reentrada após exceder a banda (mean reversion “clássico”)
+    const reenterFromBelow = pLower != null && lLower != null ? pc <= pLower && lc > lLower : false;
+    const reenterFromAbove = pUpper != null && lUpper != null ? pc >= pUpper && lc < lUpper : false;
+
+    // Breakout (continuação)
     const breakoutUp = pUpper != null && lUpper != null ? pc <= pUpper && lc > lUpper : false;
     const breakoutDown = pLower != null && lLower != null ? pc >= pLower && lc < lLower : false;
 
-    // Squeeze simples: largura das bandas estreita
-    const squeeze = widthPct > 0 ? widthPct <= 2.0 : false; // ~2% do middle
+    // “Walking the band”: continua colando na banda com slope a favor
+    const walkingUp = touchUpper && middleSlopePct > 0;
+    const walkingDown = touchLower && middleSlopePct < 0;
+
+    // Squeeze “de verdade”: largura atual está entre as mais estreitas do lookback
+    const SQUEEZE_LOOKBACK = Math.max(40, period * 3);
+    const startSq = Math.max(0, lastIndex - SQUEEZE_LOOKBACK + 1);
+    const widths = [];
+    for (let i = startSq; i <= lastIndex; i++) {
+      const m = middle[i] as number | null;
+      const u = upper[i] as number | null;
+      const l = lower[i] as number | null;
+      if (m != null && u != null && l != null && m !== 0) {
+        widths.push(((u - l) / m) * 100);
+      }
+    }
+    const sorted = widths.slice().sort((a, b) => a - b);
+    const pctRank = sorted.length
+      ? sorted.findIndex((w) => w >= widthPct) / Math.max(1, sorted.length - 1)
+      : 1; // 0=estreitíssimo, 1=larguíssimo
+    const squeeze = pctRank <= 0.2; // largura atual nos 20% mais estreitos do período
 
     // Recência de breakout (últimos N)
     let barsSinceBreakoutUp: number | null = null;
@@ -101,16 +135,72 @@ export class BollingerBandsIndicator {
         if (barsSinceBreakoutUp != null && barsSinceBreakoutDown != null) break;
       }
     }
-
     const recentBreakoutUp = barsSinceBreakoutUp != null && barsSinceBreakoutUp <= recentBars;
     const recentBreakoutDown = barsSinceBreakoutDown != null && barsSinceBreakoutDown <= recentBars;
 
-    // Estratégia: prioriza breakout (continuação). Mean reversion só quando squeeze e toque extremo
+    // Estratégia “pro”:
+    // 1) Continuação: breakout recente + slope da média a favor (ou walking the band)
+    // 2) Mean reversion: apenas em squeeze + reentrada na banda (não só “toque”)
     let entrySignal: "long" | "short" | "none" = "none";
-    if (recentBreakoutUp || breakoutUp) entrySignal = "long";
-    else if (recentBreakoutDown || breakoutDown) entrySignal = "short";
-    else if (squeeze && touchLower) entrySignal = "long";
-    else if (squeeze && touchUpper) entrySignal = "short";
+
+    // Continuação
+    const contLong = (recentBreakoutUp || breakoutUp || walkingUp) && middleSlopePct > 0;
+    const contShort = (recentBreakoutDown || breakoutDown || walkingDown) && middleSlopePct < 0;
+
+    // Mean reversion (mais conservador)
+    const mrLong =
+      squeeze &&
+      reenterFromBelow &&
+      percentB > 0 &&
+      percentB < 0.35 &&
+      Math.abs(middleSlopePct) < 0.15;
+    const mrShort =
+      squeeze &&
+      reenterFromAbove &&
+      percentB < 1 &&
+      percentB > 0.65 &&
+      Math.abs(middleSlopePct) < 0.15;
+
+    if (contLong) entrySignal = "long";
+    else if (contShort) entrySignal = "short";
+    else if (mrLong) entrySignal = "long";
+    else if (mrShort) entrySignal = "short";
+
+    // Confiança (0..1): combina estrutura, largura, posição %B e recência
+    const structure = contLong || contShort ? 0.55 : mrLong || mrShort ? 0.45 : 0.3;
+
+    // largura maior → movimentos de continuação tendem a ter mais follow-through
+    const widthFactor = Math.min(1, Math.max(0, widthPct / 6)); // >=6% satura
+    // squeeze forte ajuda MR
+    const squeezeFactor = squeeze ? (1 - pctRank) * 0.6 : 0;
+
+    // %B distância do centro, útil p/ medir “força”/“afastamento”
+    const distFromMid = Math.abs(percentB - 0.5) * 2; // 0..1
+    const trendFactor = contLong
+      ? Math.min(1, Math.max(0, middleSlopePct / 0.3))
+      : contShort
+        ? Math.min(1, Math.max(0, -middleSlopePct / 0.3))
+        : 0;
+
+    const breakoutBoost = recentBreakoutUp || recentBreakoutDown ? 0.15 : 0;
+
+    let confidence =
+      structure +
+      0.25 * (contLong || contShort ? widthFactor : squeezeFactor) +
+      0.25 * distFromMid +
+      0.25 * trendFactor +
+      breakoutBoost;
+
+    confidence = Math.max(0.3, Math.min(1, confidence));
+
+    // Qualidade: continuação com largura expandida é a melhor; MR em squeeze é boa, mas menor
+    let quality = 0.85;
+    if (contLong || contShort) {
+      quality = Math.max(quality, 0.95);
+      if (widthPct >= 4 && Math.abs(middleSlopePct) >= 0.15) quality = 1.0;
+    } else if (mrLong || mrShort) {
+      quality = Math.max(quality, 0.9);
+    }
 
     return {
       ok: true as const,
@@ -119,18 +209,24 @@ export class BollingerBandsIndicator {
       middle,
       upper,
       widthPct,
-      position,
+      percentB,
+      middleSlopePct,
       touchUpper,
       touchLower,
+      reenterFromBelow,
+      reenterFromAbove,
       breakoutUp,
       breakoutDown,
+      walkingUp,
+      walkingDown,
       squeeze,
       barsSinceBreakoutUp,
       barsSinceBreakoutDown,
       recentBreakoutUp,
       recentBreakoutDown,
       entrySignal,
-      meta: { period, stdDev, lastIndex },
+      meta: { period, stdDev, lastIndex, squeezeLookback: SQUEEZE_LOOKBACK, slopeWindow: SLOPE_K },
+      confidence,
     };
   }
 
@@ -150,14 +246,19 @@ export class BollingerBandsIndicator {
     }
 
     const dir = r.entrySignal === "long" ? 1 : r.entrySignal === "short" ? -1 : 0;
-    // confiança pondera breakout e largura de banda (movimentos em bandas mais largas tendem a ser mais significativos)
-    const widthFactor = Math.min(1, Math.max(0, r.widthPct / 5)); // >=5% satura
-    const breakoutBoost = r.recentBreakoutUp || r.recentBreakoutDown ? 0.25 : 0;
-    const confidence = Math.min(
-      1,
-      Math.max(0.3, Math.abs(dir) * (0.5 + widthFactor + breakoutBoost)),
-    );
-    const quality = r.squeeze ? 0.8 : 1;
+    const quality = (() => {
+      if (r.entrySignal === "none") return 0.8;
+      // promover continuação com largura expandindo e slope forte
+      if (
+        (r.breakoutUp || r.breakoutDown || r.walkingUp || r.walkingDown) &&
+        Math.abs(r.middleSlopePct) >= 0.15
+      ) {
+        return r.widthPct >= 4 ? 1 : 0.95;
+      }
+      // MR em squeeze tem qualidade boa, mas menor que continuação forte
+      if (r.squeeze && (r.reenterFromBelow || r.reenterFromAbove)) return 0.9;
+      return 0.85;
+    })();
 
     return {
       id: "bollinger",
@@ -165,7 +266,7 @@ export class BollingerBandsIndicator {
       entry: dir !== 0 ? "triggered" : "no-trigger",
       score: {
         directional: dir,
-        confidence,
+        confidence: r.confidence,
         quality,
       },
       health: { isValid: true },

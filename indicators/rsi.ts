@@ -1,6 +1,7 @@
 import * as TI from "technicalindicators";
 import { padLeft } from "../utils/pad-left";
 import { IIndicatorDecisionMin } from "./types";
+
 export type Candles = {
   closes: number[];
   highs?: number[];
@@ -86,33 +87,35 @@ export class RSIIndicator {
     const lastRsi = rsi[lastIndex];
     const prevRsi = rsi[prevIndex];
 
+    if (lastRsi == null || prevRsi == null) {
+      return { ok: false as const, reason: "RSI indisponível no índice atual." };
+    }
+
     // Estados básicos
-    const overSold = lastRsi != null ? lastRsi <= buyThreshold : false;
-    const overBought = lastRsi != null ? lastRsi >= sellThreshold : false;
+    const overSold = lastRsi <= buyThreshold;
+    const overBought = lastRsi >= sellThreshold;
 
     // Cruzamentos de limiares (gatilhos “clássicos”)
-    const crossUpFromOversold =
-      prevRsi != null && lastRsi != null
-        ? prevRsi <= buyThreshold && lastRsi > buyThreshold
-        : false;
-
-    const crossDownFromOverbought =
-      prevRsi != null && lastRsi != null
-        ? prevRsi >= sellThreshold && lastRsi < sellThreshold
-        : false;
+    const crossUpFromOversold = prevRsi <= buyThreshold && lastRsi > buyThreshold;
+    const crossDownFromOverbought = prevRsi >= sellThreshold && lastRsi < sellThreshold;
 
     // Cruzamentos de linha central (50) – reforço de direção
-    const crossUpMid = prevRsi != null && lastRsi != null ? prevRsi <= 50 && lastRsi > 50 : false;
-    const crossDownMid = prevRsi != null && lastRsi != null ? prevRsi >= 50 && lastRsi < 50 : false;
+    const crossUpMid = prevRsi <= 50 && lastRsi > 50;
+    const crossDownMid = prevRsi >= 50 && lastRsi < 50;
 
     // --- Slope do RSI
     const refIndex = lastIndex - slopeWindow;
     const rsiRef = refIndex >= 0 ? rsi[refIndex] : null;
-    const slope = lastRsi != null && rsiRef != null ? (lastRsi - rsiRef) / slopeWindow : 0;
+    const slope = rsiRef != null ? (lastRsi - rsiRef) / slopeWindow : 0;
     // Normalização simples do slope do RSI (0..100) → fração
     const slopePct = (slope ?? 0) / 100;
     const slopeUp = slopePct > 0;
     const slopeDown = slopePct < 0;
+
+    // Distância aos limiares (quanto falta para sair de OB/OS)
+    const distToBuy = Math.max(0, buyThreshold - lastRsi) / 100; // 0..0.3 aprox
+    const distToSell = Math.max(0, lastRsi - sellThreshold) / 100; // 0..0.3 aprox
+    const distToMid = Math.abs(lastRsi - 50) / 100; // 0..0.5
 
     // --- ATR (opcional) para stop sugerido
     let lastATR: number | undefined;
@@ -145,43 +148,39 @@ export class RSIIndicator {
     for (let i = lastIndex; i >= start; i--) {
       const rv = rsi[i];
       const rp = rsi[i - 1];
+      if (rv == null || rp == null) continue;
 
-      if (rv != null && rp != null) {
-        // último gatilho de compra (sair de sobrevenda)
-        if (
-          (barsSinceMode === "infinity"
-            ? barsSinceCrossUp === "Infinity"
-            : barsSinceCrossUp === null) &&
-          rp <= buyThreshold &&
-          rv > buyThreshold
-        ) {
-          const bars = lastIndex - i;
-          barsSinceCrossUp = bars as unknown as typeof barsSinceCrossUp;
-        }
-
-        // último gatilho de venda (sair de sobrecompra)
-        if (
-          (barsSinceMode === "infinity"
-            ? barsSinceCrossDown === "Infinity"
-            : barsSinceCrossDown === null) &&
-          rp >= sellThreshold &&
-          rv < sellThreshold
-        ) {
-          const bars = lastIndex - i;
-          barsSinceCrossDown = bars as unknown as typeof barsSinceCrossDown;
-        }
-
-        // sai cedo se já encontrou os dois
-        const upDone =
-          barsSinceMode === "infinity"
-            ? barsSinceCrossUp !== "Infinity"
-            : barsSinceCrossUp !== null;
-        const downDone =
-          barsSinceMode === "infinity"
-            ? barsSinceCrossDown !== "Infinity"
-            : barsSinceCrossDown !== null;
-        if (upDone && downDone) break;
+      // último gatilho de compra (sair de sobrevenda)
+      if (
+        (barsSinceMode === "infinity"
+          ? barsSinceCrossUp === "Infinity"
+          : barsSinceCrossUp === null) &&
+        rp <= buyThreshold &&
+        rv > buyThreshold
+      ) {
+        const bars = lastIndex - i;
+        barsSinceCrossUp = bars as unknown as typeof barsSinceCrossUp;
       }
+
+      // último gatilho de venda (sair de sobrecompra)
+      if (
+        (barsSinceMode === "infinity"
+          ? barsSinceCrossDown === "Infinity"
+          : barsSinceCrossDown === null) &&
+        rp >= sellThreshold &&
+        rv < sellThreshold
+      ) {
+        const bars = lastIndex - i;
+        barsSinceCrossDown = bars as unknown as typeof barsSinceCrossDown;
+      }
+
+      const upDone =
+        barsSinceMode === "infinity" ? barsSinceCrossUp !== "Infinity" : barsSinceCrossUp !== null;
+      const downDone =
+        barsSinceMode === "infinity"
+          ? barsSinceCrossDown !== "Infinity"
+          : barsSinceCrossDown !== null;
+      if (upDone && downDone) break;
     }
 
     const upBarsNumber: number =
@@ -205,15 +204,17 @@ export class RSIIndicator {
     const recentCrossUp = upBarsNumber <= recentBars;
     const recentCrossDown = downBarsNumber <= recentBars;
 
-    // --- Sinal final
-    // Prioriza gatilhos clássicos (sair de <30 ou >70). Como reforço, aceita cruzar a midline com slope a favor.
-    const longTrigger = recentCrossUp || crossUpMid;
-    const shortTrigger = recentCrossDown || crossDownMid;
+    // --- Sinal final (conservador e alinhado a prática):
+    // LONG: (recente saída de OS OU cruzou 50) E slope>0
+    // SHORT: (recente saída de OB OU cruzou 50 para baixo) E slope<0
+    const longTrigger = (recentCrossUp || crossUpMid) && slopeUp;
+    const shortTrigger = (recentCrossDown || crossDownMid) && slopeDown;
 
-    const entryLong = longTrigger && slopeUp;
-    const entryShort = shortTrigger && slopeDown;
-
-    const entrySignal = entryLong ? "long" : entryShort ? "short" : ("none" as const);
+    const entrySignal: "long" | "short" | "none" = longTrigger
+      ? "long"
+      : shortTrigger
+        ? "short"
+        : "none";
 
     return {
       ok: true as const,
@@ -245,8 +246,26 @@ export class RSIIndicator {
       recentCrossUp,
       recentCrossDown,
 
+      // Distâncias auxiliares
+      distToBuy,
+      distToSell,
+      distToMid,
+
       // Sinal final
       entrySignal, // "long" | "short" | "none"
+
+      // Meta
+      meta: {
+        period,
+        thresholds: { buy: buyThreshold, sell: sellThreshold },
+        confirmOnClose,
+        slopeWindow,
+        recentBars,
+        maxLookback,
+        barsSinceMode,
+        atrPeriod,
+        atrStopMultiple,
+      },
     };
   }
 
@@ -255,20 +274,47 @@ export class RSIIndicator {
   ): IIndicatorDecisionMin<ReturnType<typeof RSIIndicator.calculate>> {
     const r = RSIIndicator.calculate(params);
 
+    // ID padronizado para não quebrar o mapeamento de pesos no ensemble
     return {
-      id: `rsi${params.period}`,
+      id: "rsi",
       direction: r.entrySignal === "long" ? "buy" : r.entrySignal === "short" ? "sell" : "none",
-      entry:
-        r.entrySignal === "long"
-          ? "triggered"
-          : r.entrySignal === "short"
-            ? "triggered"
-            : "no-trigger",
-      // Núcleo mínimo para o ensemble:
+      entry: r.entrySignal !== "none" ? "triggered" : "no-trigger",
       score: {
         directional: r.entrySignal === "long" ? 1 : r.entrySignal === "short" ? -1 : 0,
-        confidence: 1, // pode sofisticar (ex.: distância a 30/70, recência, etc.)
-        quality: 1, // idem, se quiser
+        confidence: r.ok
+          ? Math.min(
+              1,
+              Math.max(
+                0,
+                // replica a mesma fórmula principal de confidence
+                (() => {
+                  const distMid = r.distToMid ?? 0;
+                  const slopeMag = Math.min(1, Math.abs(r.slopePct ?? 0) / 0.01);
+                  const base = r.entrySignal !== "none" ? 0.55 : 0.35;
+                  const distFactor =
+                    r.entrySignal === "long"
+                      ? Math.min(1, ((r.distToBuy ?? 0) + distMid) / 0.5)
+                      : r.entrySignal === "short"
+                        ? Math.min(1, ((r.distToSell ?? 0) + distMid) / 0.5)
+                        : Math.min(1, distMid / 0.5);
+                  const recencyBoost =
+                    (r.entrySignal === "long" && r.recentCrossUp) ||
+                    (r.entrySignal === "short" && r.recentCrossDown)
+                      ? 0.15
+                      : 0;
+                  return base + 0.35 * distFactor + 0.35 * slopeMag + recencyBoost;
+                })(),
+              ),
+            )
+          : 0,
+        quality: (() => {
+          let q = 0.85;
+          const multiLong = r.entrySignal === "long" && r.crossUpFromOversold;
+          const multiShort = r.entrySignal === "short" && r.crossDownFromOverbought;
+          if (multiLong || multiShort) q = 1.0;
+          else if (r.entrySignal !== "none") q = Math.max(q, 0.92);
+          return q;
+        })(),
       },
       health: { isValid: r.ok },
       data: r,
