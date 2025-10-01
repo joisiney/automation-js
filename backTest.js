@@ -1,5 +1,5 @@
 import fs from "fs";
-import { BollingerBands, EMA, MACD, RSI } from "technicalindicators";
+import { EnsembleAdaptive } from "./utils/ensemble-multi-tf";
 
 // ---------------- CONFIG ----------------
 // Configuração idêntica à do seu bot para garantir a precisão do backtest.
@@ -13,28 +13,39 @@ const config = {
   risk: { stopLossPct: 0.03, takeProfitPct: 0.04 },
 };
 
-// ---------------- JOISINEY FUNÇAO ----------------
-function computeIndicators(closes) {
-  const emaFast = EMA.calculate({ period: config.emaFastPeriod, values: closes });
-  const emaSlow = EMA.calculate({ period: config.emaSlowPeriod, values: closes });
-  const rsi = RSI.calculate({ period: config.rsiPeriod, values: closes });
-  const macd = MACD.calculate({
-    values: closes,
-    fastPeriod: 12,
-    slowPeriod: 26,
-    signalPeriod: 9,
-    SimpleMAOscillator: false,
-    SimpleMASignal: false,
+const buyOrSel = (candles1m) => {
+  const ens = new EnsembleAdaptive();
+
+  // (opcional) ajuste baseline
+  ens.setBaselineWeights({ ema: 0.2, macd: 0.16 });
+
+  // 2) decida com múltiplos TFs (ex.: 5m exec, 15m/1h confirmação, 1D regime)
+  const out = ens.decision({
+    timeframes: [
+      { label: "1m", candles: candles1m },
+      { label: "15m", candles: candles1m },
+      // { label: "1h", candles: candles1h },
+      // { label: "1D", candles: candles1D },
+    ],
+    confirmOnClose: true,
+    buyThreshold: +0.15,
+    sellThreshold: -0.15,
+    basePositionPct: 0.25,
+    maxPositionPct: 0.5,
   });
-  const bb = BollingerBands.calculate({ values: closes, period: 20, stdDev: 2 });
-  return { emaFast, emaSlow, rsi, macd, bb };
-}
+
+  return {
+    direction: out.direction, // buy, sell, none
+    positionPctOfDailyLimit: out.sizing?.positionPctOfDailyLimit, // 0.05 to 0.5
+    stopLossPrice: out.sizing?.stopLossPrice, // stop loss price
+  };
+};
 
 // ---------------- LÓGICA DO BACKTEST ----------------
 
 function runBacktest() {
   // Carrega os dados do arquivo CSV
-  const csvFilePath = "COAI_1m.csv";
+  const csvFilePath = `${process.env.SYMBOL}_${process.env.INTERVAL}.csv`;
   let ohlcv;
   try {
     const csvData = fs.readFileSync(csvFilePath, "utf8");
@@ -70,71 +81,32 @@ function runBacktest() {
   for (let i = 35; i < closes.length; i++) {
     // Começa após ter dados suficientes para os indicadores
     const currentCloses = closes.slice(0, i + 1);
-    const { emaFast, emaSlow, macd, rsi, bb } = computeIndicators(currentCloses);
-
-    const lastClose = currentCloses.at(-1);
-
-    // Pega os valores mais recentes dos indicadores
-    const curEmaFast = emaFast.at(-1);
-    const curEmaSlow = emaSlow.at(-1);
-    const curMacd = macd.at(-1);
-    const prevMacd = macd.at(-2);
-    const curRsi = rsi.at(-1);
-    const curBb = bb.at(-1);
-
-    // Condições de Tendência e Gatilho
-    const isUptrend = curEmaFast > curEmaSlow;
-    const isDowntrend = curEmaFast < curEmaSlow;
-    const macdCrossUp = prevMacd.MACD <= prevMacd.signal && curMacd.MACD > curMacd.signal;
-    const macdCrossDown = prevMacd.MACD >= prevMacd.signal && curMacd.MACD < curMacd.signal;
-
-    // --- LÓGICA DE SINAL ---
+    const result = buyOrSel(currentCloses);
+    const currentCalnde = closes[i];
 
     // LÓGICA DE COMPRA 💡
-    if (
-      !position &&
-      isUptrend &&
-      macdCrossUp &&
-      curRsi < config.rsiOverbought &&
-      lastClose < curBb.upper
-    ) {
+    if (result.direction === "buy") {
       position = {
-        entryPrice: lastClose,
+        entryPrice: currentCalnde,
         entryTime: new Date(ohlcv[i].timestamp).toISOString(),
       };
       // console.log(`COMPRA: ${position.entryPrice.toFixed(6)} em ${position.entryTime}`);
     }
     // LÓGICA DE VENDA 💰
-    else if (position) {
-      const stopPrice = position.entryPrice * (1 - config.risk.stopLossPct);
-      const takePrice = position.entryPrice * (1 + config.risk.takeProfitPct);
-      let exitReason = null;
-
-      if (lastClose <= stopPrice) {
-        exitReason = "Stop Loss";
-      } else if (lastClose >= takePrice) {
-        exitReason = "Take Profit";
-      } else if (isDowntrend && macdCrossDown) {
-        exitReason = "Reversão de Tendência";
-      }
-
-      if (exitReason) {
-        const exitPrice = lastClose;
-        const pnl = (exitPrice / position.entryPrice - 1) * 100 - config.feeRate * 200; // PnL % com taxas
-        trades.push({
-          entry: position.entryPrice,
-          exit: exitPrice,
-          pnl: pnl,
-          result: pnl > 0 ? "WIN" : "LOSS",
-          reason: exitReason,
-          entryTime: position.entryTime,
-          exitTime: new Date(ohlcv[i].timestamp).toISOString(),
-        });
-        console.log(
-          `VENDA: ${exitPrice.toFixed(6)} | PnL: ${pnl.toFixed(2)}% | Razão: ${exitReason}`,
-        );
-        position = null; // Fecha a posição
-      }
+    else if (position && result.direction === "sell") {
+      const exitPrice = currentCalnde;
+      const pnl = (exitPrice / position.entryPrice - 1) * 100 - config.feeRate * 200; // PnL % com taxas
+      trades.push({
+        entry: position.entryPrice,
+        exit: exitPrice,
+        pnl: pnl,
+        result: pnl > 0 ? "WIN" : "LOSS",
+        reason: result.direction,
+        entryTime: position.entryTime,
+        exitTime: new Date(ohlcv[i].timestamp).toISOString(),
+      });
+      console.log(`VENDA: ${exitPrice.toFixed(6)} | PnL: ${pnl.toFixed(2)}%`);
+      position = null; // Fecha a posição
     }
   }
 
