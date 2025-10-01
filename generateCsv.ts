@@ -1,6 +1,18 @@
 import { getCandles } from "./get-candles";
 import { saveCandlesToCSV } from "./saveCandlesToCSV";
 
+declare const process: {
+  env: {
+    SYMBOL?: string;
+    INTERVAL?: string;
+    MARKET?: string;
+    LIMIT?: string;
+    START_TIME?: string;
+    END_TIME?: string;
+  };
+  exit: (code: number) => never;
+};
+
 const symbol = process.env.SYMBOL!;
 const interval = process.env.INTERVAL!;
 const market = (process.env.MARKET as "spot" | "futures") || "spot";

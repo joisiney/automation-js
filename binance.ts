@@ -1,5 +1,5 @@
 import axios from "axios";
-
+import qs from "qs";
 const BINANCE_SPOT = "https://api.binance.com";
 const BINANCE_FUT = "https://fapi.binance.com";
 
@@ -77,8 +77,10 @@ export async function getKlines(
 ) {
   const symbol = await resolveSymbol(inputSymbol, { market });
 
+  const params = { symbol, interval, limit, startTime, endTime };
+  const stringParams = qs.stringify(params);
   if (market === "spot") {
-    const url = `${BINANCE_SPOT}/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}&startTime=${startTime}&endTime=${endTime}`;
+    const url = `${BINANCE_SPOT}/api/v3/klines?${stringParams}`;
     const { data } = await axios.get<any[]>(url);
     return data.map((k) => ({
       openTime: k[0],
@@ -91,7 +93,7 @@ export async function getKlines(
     }));
   }
 
-  const url = `${BINANCE_FUT}/fapi/v1/klines?symbol=${symbol}&interval=${interval}&limit=${limit}&startTime=${startTime}&endTime=${endTime}`;
+  const url = `${BINANCE_FUT}/fapi/v1/klines?${stringParams}`;
   const { data } = await axios.get<any[]>(url);
   return data.map((k) => ({
     openTime: k[0],
